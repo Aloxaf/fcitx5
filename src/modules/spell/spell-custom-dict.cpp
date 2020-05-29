@@ -248,8 +248,20 @@ std::string SpellCustomDict::locateDictFile(const std::string &lang) {
 }
 
 void SpellCustomDict::loadDict(const std::string &lang) {
-    auto file = locateDictFile(lang);
-    auto fd = UnixFD::own(open(file.c_str(), O_RDONLY));
+    auto defaultDict = locateDictFile(lang);
+    loadDictImpl(open(defaultDict.c_str(), O_RDONLY));
+
+    auto &standardPath = StandardPath::global();
+    auto extraDicts =
+        standardPath.multiOpen(StandardPath::Type::PkgData, "spell/" + lang,
+                               O_RDONLY, filter::Suffix(".fscd"));
+    for (const auto &dict : extraDicts) {
+        loadDictImpl(dict.second.fd());
+    }
+}
+
+void SpellCustomDict::loadDictImpl(int _fd) {
+    auto fd = UnixFD::own(_fd);
 
     if (!fd.isValid()) {
         throw std::runtime_error("failed to open dict file");
@@ -259,6 +271,8 @@ void SpellCustomDict::loadDict(const std::string &lang) {
         struct stat stat_buf;
         size_t total_len;
         char magic_buff[sizeof(DICT_BIN_MAGIC) - 1];
+        size_t old_words_size = words_.size();
+        size_t old_data_size = data_.size();
         if (fstat(fd.fd(), &stat_buf) == -1 ||
             static_cast<size_t>(stat_buf.st_size) <=
                 sizeof(uint32_t) + sizeof(magic_buff)) {
@@ -272,25 +286,25 @@ void SpellCustomDict::loadDict(const std::string &lang) {
             break;
         }
         total_len = stat_buf.st_size - sizeof(magic_buff);
-        data_.resize(total_len + 1);
-        if (fs::safeRead(fd.fd(), data_.data(), total_len) !=
+        data_.resize(total_len + old_data_size + (old_data_size == 0 ? 1 : 0));
+        if (fs::safeRead(fd.fd(), data_.data() + old_data_size, total_len) !=
             static_cast<ssize_t>(total_len)) {
             break;
         }
-        data_[total_len] = '\0';
+        data_[total_len + old_data_size] = '\0';
 
-        auto lcount = load_le32(data_.data());
-        words_.resize(lcount);
+        auto lcount = load_le32(data_.data() + old_data_size);
+        words_.resize(lcount + old_words_size);
 
         /* save words offset's. */
         size_t i, j;
         for (i = sizeof(uint32_t), j = 0; i < total_len && j < lcount; i += 1) {
             i += sizeof(uint16_t);
-            int l = strlen(data_.data() + i);
+            int l = strlen(data_.data() + i + old_data_size);
             if (!l) {
                 continue;
             }
-            words_[j++] = i;
+            words_[old_words_size + j++] = i + old_data_size;
             i += l;
         }
         if (j < lcount || i < total_len) {
